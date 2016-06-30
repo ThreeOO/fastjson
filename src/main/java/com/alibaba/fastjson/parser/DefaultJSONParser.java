@@ -56,7 +56,6 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONException;
 import com.alibaba.fastjson.JSONObject;
-import com.alibaba.fastjson.parser.deserializer.ASMJavaBeanDeserializer;
 import com.alibaba.fastjson.parser.deserializer.ExtraProcessable;
 import com.alibaba.fastjson.parser.deserializer.ExtraProcessor;
 import com.alibaba.fastjson.parser.deserializer.ExtraTypeProvider;
@@ -65,6 +64,7 @@ import com.alibaba.fastjson.parser.deserializer.FieldTypeResolver;
 import com.alibaba.fastjson.parser.deserializer.JavaBeanDeserializer;
 import com.alibaba.fastjson.parser.deserializer.ObjectDeserializer;
 import com.alibaba.fastjson.parser.deserializer.ResolveFieldDeserializer;
+import com.alibaba.fastjson.serializer.BeanContext;
 import com.alibaba.fastjson.serializer.IntegerCodec;
 import com.alibaba.fastjson.serializer.LongCodec;
 import com.alibaba.fastjson.serializer.StringCodec;
@@ -102,6 +102,8 @@ public class DefaultJSONParser implements Closeable {
     private List<ExtraTypeProvider>    extraTypeProviders = null;
     private List<ExtraProcessor>       extraProcessors    = null;
     protected FieldTypeResolver        fieldTypeResolver  = null;
+    
+    protected transient BeanContext    lastBeanContext;
 
     static {
         primitiveClasses.add(boolean.class);
@@ -176,7 +178,16 @@ public class DefaultJSONParser implements Closeable {
         this.config = config;
         this.symbolTable = config.symbolTable;
 
-        lexer.nextToken(JSONToken.LBRACE); // prime the pump
+        int ch = lexer.getCurrent();
+        if (ch == '{') {
+            lexer.next();
+            ((JSONLexerBase) lexer).token = JSONToken.LBRACE;
+        } else if (ch == '[') {
+            lexer.next();
+            ((JSONLexerBase) lexer).token = JSONToken.LBRACKET;
+        } else {
+            lexer.nextToken(); // prime the pump
+        }
     }
 
     public SymbolTable getSymbolTable() {
@@ -254,14 +265,18 @@ public class DefaultJSONParser implements Closeable {
                 } else if ((ch >= '0' && ch <= '9') || ch == '-') {
                     lexer.resetStringPosition();
                     lexer.scanNumber();
+                    try {
                     if (lexer.token() == JSONToken.LITERAL_INT) {
                         key = lexer.integerValue();
                     } else {
                         key = lexer.decimalValue(true);
                     }
+                    } catch (NumberFormatException e) {
+                        throw new JSONException("parse number key error" + lexer.info());
+                    }
                     ch = lexer.getCurrent();
                     if (ch != ':') {
-                        throw new JSONException("expect ':' at " + lexer.pos() + ", name " + key);
+                        throw new JSONException("parse number key error" + lexer.info());
                     }
                 } else if (ch == '{' || ch == '[') {
                     lexer.nextToken();
@@ -304,9 +319,7 @@ public class DefaultJSONParser implements Closeable {
                         try {
                             Object instance = null;
                             ObjectDeserializer deserializer = this.config.getDeserializer(clazz);
-                            if (deserializer instanceof ASMJavaBeanDeserializer) {
-                                instance = ((ASMJavaBeanDeserializer) deserializer).createInstance(this, clazz);
-                            } else if (deserializer instanceof JavaBeanDeserializer) {
+                            if (deserializer instanceof JavaBeanDeserializer) {
                                 instance = ((JavaBeanDeserializer) deserializer).createInstance(this, clazz);
                             }
 
@@ -395,11 +408,15 @@ public class DefaultJSONParser implements Closeable {
                 }
 
                 if (!setContextFlag) {
-                    ParseContext contextR = setContext(object, fieldName);
-                    if (context == null) {
-                        context = contextR;
+                    if (this.context != null && fieldName == this.context.fieldName && object == this.context.object) {
+                        context = this.context;
+                    } else {
+                        ParseContext contextR = setContext(object, fieldName);
+                        if (context == null) {
+                            context = contextR;
+                        }
+                        setContextFlag = true;
                     }
-                    setContextFlag = true;
                 }
 
                 if (object.getClass() == JSONObject.class) {
@@ -571,13 +588,13 @@ public class DefaultJSONParser implements Closeable {
 
     @SuppressWarnings("unchecked")
     public <T> T parseObject(Type type, Object fieldName) {
-        if (lexer.token() == JSONToken.NULL) {
+        int token = lexer.token();
+        if (token == JSONToken.NULL) {
             lexer.nextToken();
             return null;
         }
 
-        if (lexer.token() == JSONToken.LITERAL_STRING) {
-            type = TypeUtils.unwrap(type);
+        if (token == JSONToken.LITERAL_STRING) {
             if (type == byte[].class) {
                 byte[] bytes = lexer.bytesValue();
                 lexer.nextToken();
@@ -816,8 +833,6 @@ public class DefaultJSONParser implements Closeable {
         ObjectDeserializer deserizer = config.getDeserializer(clazz);
         if (deserizer instanceof JavaBeanDeserializer) {
             beanDeser = (JavaBeanDeserializer) deserizer;
-        } else if (deserizer instanceof ASMJavaBeanDeserializer) {
-            beanDeser = ((ASMJavaBeanDeserializer) deserizer).getInnterSerializer();
         }
 
         if (lexer.token() != JSONToken.LBRACE && lexer.token() != JSONToken.COMMA) {
@@ -1340,10 +1355,10 @@ public class DefaultJSONParser implements Closeable {
                 if (lexer.isBlankInput()) {
                     return null;
                 }
-                throw new JSONException("unterminated json string, pos " + lexer.getBufferPosition());
+                throw new JSONException("unterminated json string, " + lexer.info());
             case ERROR:
             default:
-                throw new JSONException("syntax error, pos " + lexer.getBufferPosition());
+                throw new JSONException("syntax error, " + lexer.info());
         }
     }
 
@@ -1374,11 +1389,15 @@ public class DefaultJSONParser implements Closeable {
         if (lexer.token() == token) {
             lexer.nextToken(nextExpectToken);
         } else {
-            throw new JSONException("syntax error, expect " + JSONToken.name(token) + ", actual "
-                                    + JSONToken.name(lexer.token()));
+            throwException(token);
         }
     }
-
+    
+    public void throwException(int token) {
+        throw new JSONException("syntax error, expect " + JSONToken.name(token) + ", actual "
+                                + JSONToken.name(lexer.token()));
+    }
+    
     public void close() {
         final JSONLexer lexer = this.lexer;
 
@@ -1425,38 +1444,14 @@ public class DefaultJSONParser implements Closeable {
 
     public static class ResolveTask {
 
-        private final ParseContext context;
-        private final String       referenceValue;
+        public final ParseContext context;
+        public final String       referenceValue;
         public FieldDeserializer  fieldDeserializer;
         public ParseContext       ownerContext;
 
         public ResolveTask(ParseContext context, String referenceValue){
             this.context = context;
             this.referenceValue = referenceValue;
-        }
-        
-        public ParseContext getContext() {
-            return context;
-        }
-
-        public String getReferenceValue() {
-            return referenceValue;
-        }
-
-        public FieldDeserializer getFieldDeserializer() {
-            return fieldDeserializer;
-        }
-
-        public void setFieldDeserializer(FieldDeserializer fieldDeserializer) {
-            this.fieldDeserializer = fieldDeserializer;
-        }
-
-        public ParseContext getOwnerContext() {
-            return ownerContext;
-        }
-
-        public void setOwnerContext(ParseContext ownerContext) {
-            this.ownerContext = ownerContext;
         }
     }
     

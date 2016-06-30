@@ -70,7 +70,8 @@ public class DateCodec extends AbstractDateDeserializer implements ObjectSeriali
             if (object.getClass() != fieldType) {
                 if (object.getClass() == java.util.Date.class) {
                     out.write("new Date(");
-                    out.writeLongAndChar(((Date) object).getTime(), ')');
+                    out.writeLong(((Date) object).getTime());
+                    out.write(')');
                 } else {
                     out.write('{');
                     out.writeFieldName(JSON.DEFAULT_TYPE_KEY);
@@ -187,6 +188,11 @@ public class DateCodec extends AbstractDateDeserializer implements ObjectSeriali
                 }
             }
             
+            if (strVal.startsWith("/Date(") && strVal.endsWith(")/")) {
+                String dotnetDateStr = strVal.substring(6, strVal.length() - 2);
+                strVal = dotnetDateStr;
+            }
+            
 //            JSONScanner iso8601Lexer = new JSONScanner(strVal);
 //            if (iso8601Lexer.scanISO8601DateIfMatch()) {
 //                val = iso8601Lexer.getCalendar().getTime();
@@ -203,4 +209,5 @@ public class DateCodec extends AbstractDateDeserializer implements ObjectSeriali
     public int getFastMatchToken() {
         return JSONToken.LITERAL_INT;
     }
+
 }

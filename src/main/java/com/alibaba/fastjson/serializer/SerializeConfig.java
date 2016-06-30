@@ -19,7 +19,6 @@ import java.io.File;
 import java.io.Serializable;
 import java.lang.ref.SoftReference;
 import java.lang.ref.WeakReference;
-import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Type;
 import java.math.BigDecimal;
@@ -61,6 +60,7 @@ import com.alibaba.fastjson.annotation.JSONType;
 import com.alibaba.fastjson.parser.deserializer.Jdk8DateCodec;
 import com.alibaba.fastjson.parser.deserializer.OptionalCodec;
 import com.alibaba.fastjson.util.ASMUtils;
+import com.alibaba.fastjson.util.FieldInfo;
 import com.alibaba.fastjson.util.IdentityHashMap;
 import com.alibaba.fastjson.util.ServiceLoader;
 import com.alibaba.fastjson.util.TypeUtils;
@@ -70,20 +70,19 @@ import com.alibaba.fastjson.util.TypeUtils;
  * 
  * @author wenshao[szujobs@hotmail.com]
  */
-public class SerializeConfig extends IdentityHashMap<Type, ObjectSerializer> {
-    public final static SerializeConfig globalInstance  = new SerializeConfig();
+public class SerializeConfig {
 
-	private static boolean awtError = false;
-	private static boolean jdk8Error = false;
-	private static boolean oracleJdbcError = false;
-	
-	private boolean asm = !ASMUtils.IS_ANDROID;
+    public final static SerializeConfig                   globalInstance  = new SerializeConfig();
 
-	private ASMSerializerFactory asmFactory;
-	
+    private static boolean                                awtError        = false;
+    private static boolean                                jdk8Error       = false;
+    private static boolean                                oracleJdbcError = false;
+    private boolean                                       asm             = !ASMUtils.IS_ANDROID;
+    private ASMSerializerFactory                          asmFactory;
+    protected String                                      typeKey         = JSON.DEFAULT_TYPE_KEY;
 
-	private String typeKey = JSON.DEFAULT_TYPE_KEY;
-	
+    private final IdentityHashMap<Type, ObjectSerializer> serializers;
+    
 	public String getTypeKey() {
 		return typeKey;
 	}
@@ -92,14 +91,56 @@ public class SerializeConfig extends IdentityHashMap<Type, ObjectSerializer> {
 		this.typeKey = typeKey;
 	}
 
-	public final ObjectSerializer createASMSerializer(Class<?> clazz)
-			throws Exception {
-		return asmFactory.createJavaBeanSerializer(clazz, null);
+    private final JavaBeanSerializer createASMSerializer(SerializeBeanInfo beanInfo) throws Exception {
+        JavaBeanSerializer serializer = asmFactory.createJavaBeanSerializer(beanInfo);
+        
+        for (int i = 0; i < serializer.sortedGetters.length; ++i) {
+            FieldSerializer fieldDeser = serializer.sortedGetters[i];
+            Class<?> fieldClass = fieldDeser.fieldInfo.fieldClass;
+            if (fieldClass.isEnum()) {
+                ObjectSerializer fieldSer = this.getObjectWriter(fieldClass);
+                if (!(fieldSer instanceof EnumSerializer)) {
+                    serializer.writeDirect = false;
+                }
+            }
+        }
+     
+        return serializer;
+    }
+	
+	private final ObjectSerializer createJavaBeanSerializer(Class<?> clazz) {
+	    SerializeBeanInfo beanInfo = TypeUtils.buildBeanInfo(clazz, null);
+	    if (beanInfo.fields.length == 0 && Iterable.class.isAssignableFrom(clazz)) {
+	        return MiscCodec.instance;
+	    }
+
+	    return createJavaBeanSerializer(beanInfo);
 	}
 	
-	public ObjectSerializer createJavaBeanSerializer(Class<?> clazz) {
-		if (!Modifier.isPublic(clazz.getModifiers())) {
-			return new JavaBeanSerializer(clazz);
+	public ObjectSerializer createJavaBeanSerializer(SerializeBeanInfo beanInfo) {
+	    JSONType jsonType = beanInfo.jsonType;
+	    
+	    if (jsonType != null) {
+	        Class<?> serializerClass = jsonType.serializer();
+	        if (serializerClass != Void.class) {
+	            try {
+                    Object seralizer = serializerClass.newInstance();
+                    if (seralizer instanceof ObjectSerializer) {
+                        return (ObjectSerializer) seralizer;
+                    }
+                } catch (Throwable e) {
+                    // skip
+                }
+	        }
+	        
+	        if (jsonType.asm() == false) {
+	            asm = false;
+	        }
+        }
+	    
+	    Class<?> clazz = beanInfo.beanType;
+		if (!Modifier.isPublic(beanInfo.beanType.getModifiers())) {
+			return new JavaBeanSerializer(beanInfo);
 		}
 
 		boolean asm = this.asm;
@@ -109,21 +150,21 @@ public class SerializeConfig extends IdentityHashMap<Type, ObjectSerializer> {
 			asm = false;
 		}
 
-		{
-			JSONType annotation = clazz.getAnnotation(JSONType.class);
-			if (annotation != null && annotation.asm() == false) {
-				asm = false;
-			}
-		}
-
 		if (asm && !ASMUtils.checkName(clazz.getName())) {
 		    asm = false;
 		}
 		
 		if (asm) {
-    		for(Field field : clazz.getDeclaredFields()){
-    			JSONField annotation = field.getAnnotation(JSONField.class);
-    			if (annotation != null && !ASMUtils.checkName(annotation.name())) {
+    		for(FieldInfo field : beanInfo.fields){
+    			JSONField annotation = field.getAnnotation();
+    			
+    			if (annotation == null) {
+    			    continue;
+    			}
+                if ((!ASMUtils.checkName(annotation.name())) //
+                        || annotation.format().length() != 0
+                        || annotation.jsonDirect()
+                        ) {
     				asm = false;
     				break;
     			}
@@ -132,10 +173,12 @@ public class SerializeConfig extends IdentityHashMap<Type, ObjectSerializer> {
 		
 		if (asm) {
 			try {
-			    ObjectSerializer asmSerializer = createASMSerializer(clazz);
+			    ObjectSerializer asmSerializer = createASMSerializer(beanInfo);
 			    if (asmSerializer != null) {
 			        return asmSerializer;
 			    }
+			} catch (ClassFormatError e) {
+			    // skip
 			} catch (ClassCastException e) {
 				// skip
 			} catch (Throwable e) {
@@ -144,7 +187,7 @@ public class SerializeConfig extends IdentityHashMap<Type, ObjectSerializer> {
 			}
 		}
 
-		return new JavaBeanSerializer(clazz);
+		return new JavaBeanSerializer(beanInfo);
 	}
 
 	public boolean isAsmEnable() {
@@ -167,7 +210,7 @@ public class SerializeConfig extends IdentityHashMap<Type, ObjectSerializer> {
 	}
 
 	public SerializeConfig(int tableSize) {
-		super(tableSize);
+	    serializers = new IdentityHashMap<Type, ObjectSerializer>(1024);
 		
 		try {
 		    if (asm) {
@@ -202,22 +245,22 @@ public class SerializeConfig extends IdentityHashMap<Type, ObjectSerializer> {
 		put(Class.class, MiscCodec.instance);
 
 		put(SimpleDateFormat.class, MiscCodec.instance);
-		put(Locale.class, MiscCodec.instance);
-		put(Currency.class, CurrencyCodec.instance);
+		put(Currency.class, new MiscCodec());
 		put(TimeZone.class, MiscCodec.instance);
-		put(UUID.class, MiscCodec.instance);
 		put(InetAddress.class, MiscCodec.instance);
 		put(Inet4Address.class, MiscCodec.instance);
 		put(Inet6Address.class, MiscCodec.instance);
 		put(InetSocketAddress.class, MiscCodec.instance);
 		put(File.class, MiscCodec.instance);
-		put(URI.class, MiscCodec.instance);
-		put(URL.class, MiscCodec.instance);
 		put(Appendable.class, AppendableSerializer.instance);
 		put(StringBuffer.class, AppendableSerializer.instance);
 		put(StringBuilder.class, AppendableSerializer.instance);
-		put(Pattern.class, MiscCodec.instance);
-		put(Charset.class, CharsetCodec.instance);
+		put(Charset.class, ToStringSerializer.instance);
+		put(Pattern.class, ToStringSerializer.instance);
+		put(Locale.class, ToStringSerializer.instance);
+		put(URI.class, ToStringSerializer.instance);
+		put(URL.class, ToStringSerializer.instance);
+		put(UUID.class, ToStringSerializer.instance);
 
 		// atomic
 		put(AtomicBoolean.class, AtomicCodec.instance);
@@ -229,58 +272,71 @@ public class SerializeConfig extends IdentityHashMap<Type, ObjectSerializer> {
 		
 		put(WeakReference.class, ReferenceCodec.instance);
 		put(SoftReference.class, ReferenceCodec.instance);
-
-		// awt
-		if (!awtError) {
-    		try {
-    			put(Class.forName("java.awt.Color"), AwtCodec.instance);
-    			put(Class.forName("java.awt.Font"), AwtCodec.instance);
-    			put(Class.forName("java.awt.Point"), AwtCodec.instance);
-                put(Class.forName("java.awt.Rectangle"), AwtCodec.instance);
-    		} catch (Throwable e) {
-    		    awtError = true;
-    			// skip
-    		}
-		}
-		
-		// jdk8
-		if (!jdk8Error) {
-    		try {
-    		    put(Class.forName("java.time.LocalDateTime"), Jdk8DateCodec.instance);
-    		    put(Class.forName("java.time.LocalDate"), Jdk8DateCodec.instance);
-    		    put(Class.forName("java.time.LocalTime"), Jdk8DateCodec.instance);
-    		    put(Class.forName("java.time.ZonedDateTime"), Jdk8DateCodec.instance);
-    		    put(Class.forName("java.time.OffsetDateTime"), Jdk8DateCodec.instance);
-    		    put(Class.forName("java.time.OffsetTime"), Jdk8DateCodec.instance);
-    		    put(Class.forName("java.time.ZoneOffset"), Jdk8DateCodec.instance);
-    		    put(Class.forName("java.time.ZoneRegion"), Jdk8DateCodec.instance);
-    		    put(Class.forName("java.time.Period"), Jdk8DateCodec.instance);
-    		    put(Class.forName("java.time.Duration"), Jdk8DateCodec.instance);
-    		    put(Class.forName("java.time.Instant"), Jdk8DateCodec.instance);
-    		    
-    		    put(Class.forName("java.util.Optional"), OptionalCodec.instance);
-    		    put(Class.forName("java.util.OptionalDouble"), OptionalCodec.instance);
-    		    put(Class.forName("java.util.OptionalInt"), OptionalCodec.instance);
-    		    put(Class.forName("java.util.OptionalLong"), OptionalCodec.instance);
-    		} catch (Throwable e) {
-    		    // skip
-    		    jdk8Error = true;
-    		}
-		}
-		
-		if (!oracleJdbcError) {
-		    try {
-                put(Class.forName("oracle.sql.DATE"), DateCodec.instance);
-                put(Class.forName("oracle.sql.TIMESTAMP"), DateCodec.instance);
-            } catch (Throwable e) {
-                // skip
-                oracleJdbcError = true;
-            }
-		}
 	}
+	
+	/**
+	 * add class level serialize filter
+	 * @since 1.2.10
+	 */
+	public void addFilter(Class<?> clazz, SerializeFilter filter) {
+	    ObjectSerializer serializer = getObjectWriter(clazz);
+	    
+	    if (serializer instanceof SerializeFilterable) {
+	        SerializeFilterable filterable = (SerializeFilterable) serializer;
+	        filterable.addFilter(filter);
+	    }
+	}
+	
+    /** class level serializer feature config
+     * @since 1.2.12
+     */
+    public void config(Class<?> clazz, SerializerFeature feature, boolean value) {
+        ObjectSerializer serializer = getObjectWriter(clazz, false);
+        
+        if (serializer == null) {
+            SerializeBeanInfo beanInfo = TypeUtils.buildBeanInfo(clazz, null);
+            
+            if (value) {
+                beanInfo.features |= feature.mask;
+            } else {
+                beanInfo.features &= ~feature.mask;
+            }
+            
+            serializer = this.createJavaBeanSerializer(beanInfo);
+            
+            put(clazz, serializer);
+            return;
+        }
 
-	public ObjectSerializer getObjectWriter(Class<?> clazz) {
-        ObjectSerializer writer = get(clazz);
+        if (serializer instanceof JavaBeanSerializer) {
+            JavaBeanSerializer javaBeanSerializer = (JavaBeanSerializer) serializer;
+            SerializeBeanInfo beanInfo = javaBeanSerializer.beanInfo;
+            
+            int originalFeaturs = beanInfo.features;
+            if (value) {
+                beanInfo.features |= feature.mask;
+            } else {
+                beanInfo.features &= ~feature.mask;
+            }
+            
+            if (originalFeaturs == beanInfo.features) {
+                return;
+            }
+            
+            Class<?> serializerClass = serializer.getClass();
+            if (serializerClass != JavaBeanSerializer.class) {
+                ObjectSerializer newSerializer = this.createJavaBeanSerializer(beanInfo);
+                this.put(clazz, newSerializer);
+            }
+        }
+    }
+    
+    public ObjectSerializer getObjectWriter(Class<?> clazz) {
+        return getObjectWriter(clazz, true);
+    }
+	
+	private ObjectSerializer getObjectWriter(Class<?> clazz, boolean create) {
+        ObjectSerializer writer = serializers.get(clazz);
 
         if (writer == null) {
             try {
@@ -299,7 +355,7 @@ public class SerializeConfig extends IdentityHashMap<Type, ObjectSerializer> {
                 // skip
             }
 
-            writer = get(clazz);
+            writer = serializers.get(clazz);
         }
 
         if (writer == null) {
@@ -321,10 +377,10 @@ public class SerializeConfig extends IdentityHashMap<Type, ObjectSerializer> {
                     // skip
                 }
 
-                writer = get(clazz);
+                writer = serializers.get(clazz);
             }
         }
-
+        
         if (writer == null) {
             if (Map.class.isAssignableFrom(clazz)) {
                 put(clazz, MapSerializer.instance);
@@ -347,25 +403,94 @@ public class SerializeConfig extends IdentityHashMap<Type, ObjectSerializer> {
                 ObjectSerializer compObjectSerializer = getObjectWriter(componentType);
                 put(clazz, new ArraySerializer(componentType, compObjectSerializer));
             } else if (Throwable.class.isAssignableFrom(clazz)) {
-                int features = TypeUtils.getSerializeFeatures(clazz);
-                features |= SerializerFeature.WriteClassName.mask;
-                put(clazz, new JavaBeanSerializer(clazz, null, features));
+                SerializeBeanInfo beanInfo = TypeUtils.buildBeanInfo(clazz, null);
+                beanInfo.features |= SerializerFeature.WriteClassName.mask;
+                put(clazz, new JavaBeanSerializer(beanInfo));
             } else if (TimeZone.class.isAssignableFrom(clazz)) {
                 put(clazz, MiscCodec.instance);
             } else if (Appendable.class.isAssignableFrom(clazz)) {
                 put(clazz, AppendableSerializer.instance);
             } else if (Charset.class.isAssignableFrom(clazz)) {
-                put(clazz, CharsetCodec.instance);
+                put(clazz, ToStringSerializer.instance);
             } else if (Enumeration.class.isAssignableFrom(clazz)) {
                 put(clazz, EnumerationSerializer.instance);
             } else if (Calendar.class.isAssignableFrom(clazz)) {
                 put(clazz, CalendarCodec.instance);
             } else if (Clob.class.isAssignableFrom(clazz)) {
                 put(clazz, ClobSeriliazer.instance);
-            } else if (Iterable.class.isAssignableFrom(clazz) // 
-                    || Iterator.class.isAssignableFrom(clazz)) {
+            } else if (TypeUtils.isPath(clazz)) {
+                put(clazz, ToStringSerializer.instance);
+            } else if (Iterator.class.isAssignableFrom(clazz)) {
                 put(clazz, MiscCodec.instance);
             } else {
+                String className = clazz.getName();
+                if (className.startsWith("java.awt.") //
+                    && AwtCodec.support(clazz) //
+                ) {
+                    // awt
+                    if (!awtError) {
+                        try {
+                            put(Class.forName("java.awt.Color"), AwtCodec.instance);
+                            put(Class.forName("java.awt.Font"), AwtCodec.instance);
+                            put(Class.forName("java.awt.Point"), AwtCodec.instance);
+                            put(Class.forName("java.awt.Rectangle"), AwtCodec.instance);
+                        } catch (Throwable e) {
+                            awtError = true;
+                            // skip
+                        }
+                    }
+                    return  AwtCodec.instance;
+                }
+                
+                // jdk8
+                if ((!jdk8Error) //
+                    && (className.startsWith("java.time.") //
+                        || className.startsWith("java.util.Optional") //
+                    )) {
+                    try {
+                        put(Class.forName("java.time.LocalDateTime"), Jdk8DateCodec.instance);
+                        put(Class.forName("java.time.LocalDate"), Jdk8DateCodec.instance);
+                        put(Class.forName("java.time.LocalTime"), Jdk8DateCodec.instance);
+                        put(Class.forName("java.time.ZonedDateTime"), Jdk8DateCodec.instance);
+                        put(Class.forName("java.time.OffsetDateTime"), Jdk8DateCodec.instance);
+                        put(Class.forName("java.time.OffsetTime"), Jdk8DateCodec.instance);
+                        put(Class.forName("java.time.ZoneOffset"), Jdk8DateCodec.instance);
+                        put(Class.forName("java.time.ZoneRegion"), Jdk8DateCodec.instance);
+                        put(Class.forName("java.time.Period"), Jdk8DateCodec.instance);
+                        put(Class.forName("java.time.Duration"), Jdk8DateCodec.instance);
+                        put(Class.forName("java.time.Instant"), Jdk8DateCodec.instance);
+
+                        put(Class.forName("java.util.Optional"), OptionalCodec.instance);
+                        put(Class.forName("java.util.OptionalDouble"), OptionalCodec.instance);
+                        put(Class.forName("java.util.OptionalInt"), OptionalCodec.instance);
+                        put(Class.forName("java.util.OptionalLong"), OptionalCodec.instance);
+                        
+                        writer = serializers.get(clazz);
+                        if (writer != null) {
+                            return writer;
+                        }
+                    } catch (Throwable e) {
+                        // skip
+                        jdk8Error = true;
+                    }
+                }
+                
+                if ((!oracleJdbcError) //
+                    && className.startsWith("oracle.sql.")) {
+                    try {
+                        put(Class.forName("oracle.sql.DATE"), DateCodec.instance);
+                        put(Class.forName("oracle.sql.TIMESTAMP"), DateCodec.instance);
+                        
+                        writer = serializers.get(clazz);
+                        if (writer != null) {
+                            return writer;
+                        }
+                    } catch (Throwable e) {
+                        // skip
+                        oracleJdbcError = true;
+                    }
+                }
+                
                 boolean isCglibProxy = false;
                 boolean isJavassistProxy = false;
                 for (Class<?> item : clazz.getInterfaces()) {
@@ -386,15 +511,38 @@ public class SerializeConfig extends IdentityHashMap<Type, ObjectSerializer> {
                     Class<?> superClazz = clazz.getSuperclass();
 
                     ObjectSerializer superWriter = getObjectWriter(superClazz);
-                    put(clazz, superWriter);
+                    putInternal(clazz, superWriter);
                     return superWriter;
                 }
 
-                put(clazz, createJavaBeanSerializer(clazz));
+                if (create) {
+                    putInternal(clazz, createJavaBeanSerializer(clazz));
+                }
             }
 
-            writer = get(clazz);
+            writer = serializers.get(clazz);
         }
         return writer;
+    }
+	
+	public final ObjectSerializer get(Type key) {
+	    return this.serializers.get(key);
+	}
+	
+	public boolean put(Type type, ObjectSerializer value) {
+	    boolean isEnum = false;
+	    if (type instanceof Class) {
+	        Class<?> clazz = (Class<?>) type;
+	        isEnum = clazz.isEnum();
+	    }
+	    if (isEnum) {
+	        
+	    }
+	    
+	    return putInternal(type, value);
+	}
+	
+	protected boolean putInternal(Type key, ObjectSerializer value) {
+        return this.serializers.put(key, value);
     }
 }

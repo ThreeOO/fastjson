@@ -1,8 +1,8 @@
 package com.alibaba.fastjson;
 
-import java.io.IOException;
 import java.lang.reflect.Array;
-import java.lang.reflect.Type;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
@@ -14,13 +14,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import com.alibaba.fastjson.parser.ParserConfig;
-import com.alibaba.fastjson.parser.deserializer.ASMJavaBeanDeserializer;
 import com.alibaba.fastjson.parser.deserializer.FieldDeserializer;
 import com.alibaba.fastjson.parser.deserializer.JavaBeanDeserializer;
 import com.alibaba.fastjson.parser.deserializer.ObjectDeserializer;
-import com.alibaba.fastjson.serializer.ASMJavaBeanSerializer;
-import com.alibaba.fastjson.serializer.FieldSerializer;
-import com.alibaba.fastjson.serializer.JSONSerializer;
 import com.alibaba.fastjson.serializer.JavaBeanSerializer;
 import com.alibaba.fastjson.serializer.ObjectSerializer;
 import com.alibaba.fastjson.serializer.SerializeConfig;
@@ -35,11 +31,11 @@ public class JSONPath implements JSONAware {
     private static int                             CACHE_SIZE = 1024;
     private static ConcurrentMap<String, JSONPath> pathCache  = new ConcurrentHashMap<String, JSONPath>(128, 0.75f, 1);
 
-    private final String path;
-    private Segement[]   segments;
+    private final String                           path;
+    private Segement[]                             segments;
 
-    private SerializeConfig serializeConfig;
-    private ParserConfig    parserConfig;
+    private SerializeConfig                        serializeConfig;
+    private ParserConfig                           parserConfig;
 
     public JSONPath(String path){
         this(path, SerializeConfig.getGlobalInstance(), ParserConfig.getGlobalInstance());
@@ -47,7 +43,7 @@ public class JSONPath implements JSONAware {
 
     public JSONPath(String path, SerializeConfig serializeConfig, ParserConfig parserConfig){
         if (path == null || path.isEmpty()) {
-            throw new IllegalArgumentException();
+            throw new JSONPathException("json-path can not be null or empty");
         }
 
         this.path = path;
@@ -191,7 +187,7 @@ public class JSONPath implements JSONAware {
             }
             newResult = descArray;
         } else {
-            throw new UnsupportedOperationException();
+            throw new JSONException("unsupported array put operation. " + resultClass);
         }
 
         Segement lastSegement = segments[segments.length - 1];
@@ -283,6 +279,10 @@ public class JSONPath implements JSONAware {
     }
 
     public static JSONPath compile(String path) {
+        if (path == null) {
+            throw new JSONPathException("jsonpath can not be null");
+        }
+        
         JSONPath jsonpath = pathCache.get(path);
         if (jsonpath == null) {
             jsonpath = new JSONPath(path);
@@ -341,11 +341,6 @@ public class JSONPath implements JSONAware {
             }
             while (!isEOF()) {
                 skipWhitespace();
-
-                if (ch == '@') {
-                    next();
-                    return SelfSegement.instance;
-                }
 
                 if (ch == '$') {
                     next();
@@ -1007,23 +1002,6 @@ public class JSONPath implements JSONAware {
         Object eval(JSONPath path, Object rootObject, Object currentObject);
     }
 
-    // static class RootSegement implements Segement {
-    //
-    // public final static RootSegement instance = new RootSegement();
-    //
-    // public Object eval(JSONPath path, Object rootObject, Object currentObject) {
-    // return rootObject;
-    // }
-    // }
-
-    static class SelfSegement implements Segement {
-
-        public final static SelfSegement instance = new SelfSegement();
-
-        public Object eval(JSONPath path, Object rootObject, Object currentObject) {
-            return currentObject;
-        }
-    }
 
     static class SizeSegement implements Segement {
 
@@ -1596,7 +1574,8 @@ public class JSONPath implements JSONAware {
             return true;
         }
 
-        if (currentObject.getClass().isArray()) {
+        Class<?> clazz = currentObject.getClass();
+        if (clazz.isArray()) {
             int arrayLenth = Array.getLength(currentObject);
 
             if (index >= 0) {
@@ -1612,7 +1591,7 @@ public class JSONPath implements JSONAware {
             return true;
         }
 
-        throw new UnsupportedOperationException();
+        throw new JSONPathException("unsupported set operation." + clazz);
     }
 
     @SuppressWarnings({ "rawtypes", "unchecked" })
@@ -1666,19 +1645,47 @@ public class JSONPath implements JSONAware {
         Class clazzA = a.getClass();
         boolean isIntA = isInt(clazzA);
 
-        Class clazzB = a.getClass();
+        Class clazzB = b.getClass();
         boolean isIntB = isInt(clazzB);
-
-        if (isIntA && isIntB) {
-            return a.longValue() == b.longValue();
+        
+        if (a instanceof BigDecimal) {
+            BigDecimal decimalA = (BigDecimal) a;
+            
+            if (isIntB) {
+                return decimalA.equals(BigDecimal.valueOf(b.longValue()));
+            }
         }
+
+        if (isIntA) {
+            if (isIntB) {
+                return a.longValue() == b.longValue();
+            }
+            
+            if (b instanceof BigInteger) {
+                BigInteger bigIntB = (BigInteger) a;
+                BigInteger bigIntA = BigInteger.valueOf(a.longValue());
+                
+                return bigIntA.equals(bigIntB);
+            }
+        }
+        
+        if (isIntB) {
+            if (a instanceof BigInteger) {
+                BigInteger bigIntA = (BigInteger) a;
+                BigInteger bigIntB = BigInteger.valueOf(b.longValue());
+                
+                return bigIntA.equals(bigIntB);
+            }
+        }
+        
 
         boolean isDoubleA = isDouble(clazzA);
         boolean isDoubleB = isDouble(clazzB);
 
-        if ((isDoubleA && isDoubleB) || (isDoubleA && isIntA) || (isDoubleB && isIntA)) {
+        if ((isDoubleA && isDoubleB) || (isDoubleA && isIntB) || (isDoubleB && isIntA)) {
             return a.doubleValue() == b.doubleValue();
         }
+        
 
         return false;
     }
@@ -1707,11 +1714,7 @@ public class JSONPath implements JSONAware {
         JavaBeanSerializer beanSerializer = getJavaBeanSerializer(currentClass);
         if (beanSerializer != null) {
             try {
-                FieldSerializer getter = beanSerializer.getFieldSerializer(propertyName);
-                if (getter == null) {
-                    return null;
-                }
-                return getter.getPropertyValue(currentObject);
+                return beanSerializer.getFieldValue(currentObject, propertyName);
             } catch (Exception e) {
                 throw new JSONPathException("jsonpath error, path " + path + ", segement " + propertyName, e);
             }
@@ -1755,8 +1758,6 @@ public class JSONPath implements JSONAware {
         JavaBeanDeserializer beanDerializer = null;
         if (derializer instanceof JavaBeanDeserializer) {
             beanDerializer = (JavaBeanDeserializer) derializer;
-        } else if (derializer instanceof ASMJavaBeanDeserializer) {
-            beanDerializer = ((ASMJavaBeanDeserializer) derializer).getInnterSerializer();
         }
 
         if (beanDerializer != null) {
@@ -1778,8 +1779,6 @@ public class JSONPath implements JSONAware {
             ObjectSerializer serializer = serializeConfig.getObjectWriter(currentClass);
             if (serializer instanceof JavaBeanSerializer) {
                 beanSerializer = (JavaBeanSerializer) serializer;
-            } else if (serializer instanceof ASMJavaBeanSerializer) {
-                beanSerializer = ((ASMJavaBeanSerializer) serializer).getJavaBeanSerializer();
             }
         }
         return beanSerializer;
@@ -1821,23 +1820,10 @@ public class JSONPath implements JSONAware {
         }
 
         try {
-            List<Object> values = beanSerializer.getFieldValues(currentObject);
-
-            int count = 0;
-            for (int i = 0; i < values.size(); ++i) {
-                if (values.get(i) != null) {
-                    count++;
-                }
-            }
-            return count;
+            return beanSerializer.getSize(currentObject);
         } catch (Exception e) {
-            throw new JSONException("evalSize error : " + path, e);
+            throw new JSONPathException("evalSize error : " + path, e);
         }
-    }
-
-    public void write(JSONSerializer serializer, Object object, Object fieldName, Type fieldType,
-                      int features) throws IOException {
-        serializer.write(path);
     }
 
     @Override

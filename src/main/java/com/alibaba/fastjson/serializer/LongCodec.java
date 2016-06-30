@@ -36,16 +36,12 @@ public class LongCodec implements ObjectSerializer, ObjectDeserializer {
         SerializeWriter out = serializer.out;
 
         if (object == null) {
-            if (out.isEnabled(SerializerFeature.WriteNullNumberAsZero)) {
-                out.write('0');
-            } else {
-                out.writeNull();
-            }
+            out.writeNull(SerializerFeature.WriteNullNumberAsZero);
         } else {
             long value = ((Long) object).longValue();
             out.writeLong(value);
     
-            if (out.writeClassName //
+            if (out.isEnabled(SerializerFeature.WriteClassName) //
                 && value <= Integer.MAX_VALUE && value >= Integer.MIN_VALUE //
                 && fieldType != Long.class) {
                 out.write('L');

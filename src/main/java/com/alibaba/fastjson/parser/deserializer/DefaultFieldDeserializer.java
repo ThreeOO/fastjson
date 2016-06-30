@@ -18,6 +18,14 @@ public class DefaultFieldDeserializer extends FieldDeserializer {
     public DefaultFieldDeserializer(ParserConfig mapping, Class<?> clazz, FieldInfo fieldInfo){
         super(clazz, fieldInfo);
     }
+    
+    public ObjectDeserializer getFieldValueDeserilizer(ParserConfig config) {
+        if (fieldValueDeserilizer == null) {
+            fieldValueDeserilizer = config.getDeserializer(fieldInfo.fieldClass, fieldInfo.fieldType);
+        }
+
+        return fieldValueDeserilizer;
+    }
 
     @Override
     public void parseField(DefaultJSONParser parser, Object object, Type objectType, Map<String, Object> fieldValues) {
@@ -25,12 +33,28 @@ public class DefaultFieldDeserializer extends FieldDeserializer {
             fieldValueDeserilizer = parser.getConfig().getDeserializer(fieldInfo);
         }
 
+        Type fieldType = fieldInfo.fieldType;
         if (objectType instanceof ParameterizedType) {
             ParseContext objContext = parser.getContext();
             objContext.type = objectType;
+            fieldType= FieldInfo.getFieldType(this.clazz, objectType, fieldType);
         }
 
-        Object value = fieldValueDeserilizer.deserialze(parser, fieldInfo.fieldType, fieldInfo.name);
+        // ContextObjectDeserializer
+        Object value;
+        if (fieldValueDeserilizer instanceof JavaBeanDeserializer) {
+            JavaBeanDeserializer javaBeanDeser = (JavaBeanDeserializer) fieldValueDeserilizer;
+            value = javaBeanDeser.deserialze(parser, fieldType, fieldInfo.name, fieldInfo.parserFeatures);
+        } else {
+            if (this.fieldInfo.format != null
+                    && fieldValueDeserilizer instanceof ContextObjectDeserializer
+                    ) {
+                value = ((ContextObjectDeserializer)fieldValueDeserilizer) //
+                        .deserialze(parser, fieldType, fieldInfo.name, fieldInfo.format, fieldInfo.parserFeatures);
+            } else {
+                value = fieldValueDeserilizer.deserialze(parser, fieldType, fieldInfo.name);
+            }
+        }
         if (parser.getResolveStatus() == DefaultJSONParser.NeedToResolve) {
             ResolveTask task = parser.getLastResolveTask();
             task.fieldDeserializer = this;

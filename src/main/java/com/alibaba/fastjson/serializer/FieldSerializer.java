@@ -16,10 +16,9 @@
 package com.alibaba.fastjson.serializer;
 
 import java.io.IOException;
-import java.lang.reflect.Member;
+import java.lang.reflect.InvocationTargetException;
 import java.util.Collection;
 
-import com.alibaba.fastjson.JSONException;
 import com.alibaba.fastjson.annotation.JSONField;
 import com.alibaba.fastjson.util.FieldInfo;
 
@@ -39,10 +38,6 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
     protected BeanContext         fieldContext;
 
     private String                format;
-    protected boolean             writeNumberAsZero       = false;
-    protected boolean             writeNullStringAsEmpty  = false;
-    protected boolean             writeNullBooleanAsFalse = false;
-    protected boolean             writeNullListAsEmpty    = false;
     protected boolean             writeEnumUsingToString  = false;
     protected boolean             writeEnumUsingName      = false;
 
@@ -73,15 +68,7 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
             }
 
             for (SerializerFeature feature : annotation.serialzeFeatures()) {
-                if (feature == SerializerFeature.WriteNullNumberAsZero) {
-                    writeNumberAsZero = true;
-                } else if (feature == SerializerFeature.WriteNullStringAsEmpty) {
-                    writeNullStringAsEmpty = true;
-                } else if (feature == SerializerFeature.WriteNullBooleanAsFalse) {
-                    writeNullBooleanAsFalse = true;
-                } else if (feature == SerializerFeature.WriteNullListAsEmpty) {
-                    writeNullListAsEmpty = true;
-                } else if (feature == SerializerFeature.WriteEnumUsingToString) {
+                if (feature == SerializerFeature.WriteEnumUsingToString) {
                     writeEnumUsingToString = true;
                 }else if(feature == SerializerFeature.WriteEnumUsingName){
                     writeEnumUsingName = true;
@@ -114,18 +101,9 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
         }
     }
 
-    public Object getPropertyValue(Object object) throws Exception {
-        try {
-            return fieldInfo.get(object);
-        } catch (Exception ex) {
-            Member member =  fieldInfo.getMember();
-            String qualifiedName = member.getDeclaringClass().getName() + "." + member.getName();
-            
-            throw new JSONException("get property error。 " + qualifiedName, ex);
-        }
+    public Object getPropertyValue(Object object) throws InvocationTargetException, IllegalAccessException {
+        return fieldInfo.get(object);
     }
-
-
     
     public int compareTo(FieldSerializer o) {
         return this.fieldInfo.compareTo(o.fieldInfo);
@@ -133,11 +111,6 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
     
 
     public void writeValue(JSONSerializer serializer, Object propertyValue) throws Exception {
-        if (format != null) {
-            serializer.writeWithFormat(propertyValue, format);
-            return;
-        }
-
         if (runtimeInfo == null) {
 
             Class<?> runtimeFieldClass;
@@ -158,24 +131,24 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
         if (propertyValue == null) {
             Class<?> runtimeFieldClass = runtimeInfo.runtimeFieldClass;
             SerializeWriter out  = serializer.out;
-            boolean writeNumberAsZero = this.writeNumberAsZero || (out.features & SerializerFeature.WriteNullNumberAsZero.mask) != 0;
-            if (writeNumberAsZero && Number.class.isAssignableFrom(runtimeFieldClass)) {
-                out.write('0');
+            if (Number.class.isAssignableFrom(runtimeFieldClass)) {
+                out.writeNull(features, SerializerFeature.WriteNullNumberAsZero.mask);
                 return;
-            } else if (writeNullStringAsEmpty && String.class == runtimeFieldClass) {
-                out.write("\"\"");
+            } else if (String.class == runtimeFieldClass) {
+                out.writeNull(features, SerializerFeature.WriteNullStringAsEmpty.mask);
                 return;
-            } else if (writeNullBooleanAsFalse && Boolean.class == runtimeFieldClass) {
-                out.write("false");
+            } else if (Boolean.class == runtimeFieldClass) {
+                out.writeNull(features, SerializerFeature.WriteNullBooleanAsFalse.mask);
                 return;
-            } else if (writeNullListAsEmpty && Collection.class.isAssignableFrom(runtimeFieldClass)) {
-                out.write("[]");
+            } else if (Collection.class.isAssignableFrom(runtimeFieldClass)) {
+                out.writeNull(features, SerializerFeature.WriteNullListAsEmpty.mask);
                 return;
             }
 
             ObjectSerializer fieldSerializer = runtimeInfo.fieldSerializer;
-            if ((out.writeMapNullValue) 
-                    && fieldSerializer instanceof ASMJavaBeanSerializer) {
+            
+            if ((out.isEnabled(SerializerFeature.WriteMapNullValue)) 
+                    && fieldSerializer instanceof JavaBeanSerializer) {
                 out.writeNull();
                 return;
             }
@@ -197,13 +170,23 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
         }
         
         Class<?> valueClass = propertyValue.getClass();
+        ObjectSerializer valueSerializer;
         if (valueClass == runtimeInfo.runtimeFieldClass) {
-            runtimeInfo.fieldSerializer.write(serializer, propertyValue, fieldInfo.name, fieldInfo.fieldType, fieldFeatures);
-            return;
+            valueSerializer = runtimeInfo.fieldSerializer;
+        } else {
+            valueSerializer = serializer.getObjectWriter(valueClass);
         }
-
-        ObjectSerializer valueSerializer = serializer.getObjectWriter(valueClass);
-        valueSerializer.write(serializer, propertyValue, fieldInfo.name, fieldInfo.fieldType, fieldFeatures);
+        
+        if (format != null) {
+            if (valueSerializer instanceof ContextObjectSerializer) {
+                ((ContextObjectSerializer) valueSerializer).write(serializer, propertyValue, this.fieldContext);    
+            } else {
+                serializer.writeWithFormat(propertyValue, format);
+            }
+        } else {
+            valueSerializer.write(serializer, propertyValue, fieldInfo.name, fieldInfo.fieldType, fieldFeatures);
+        }        
+        
     }
 
     static class RuntimeSerializerInfo {

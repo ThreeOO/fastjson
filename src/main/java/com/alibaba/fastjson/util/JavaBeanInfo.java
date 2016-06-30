@@ -20,6 +20,7 @@ import com.alibaba.fastjson.annotation.JSONCreator;
 import com.alibaba.fastjson.annotation.JSONField;
 import com.alibaba.fastjson.annotation.JSONPOJOBuilder;
 import com.alibaba.fastjson.annotation.JSONType;
+import com.alibaba.fastjson.parser.Feature;
 import com.alibaba.fastjson.serializer.SerializerFeature;
 
 public class JavaBeanInfo {
@@ -39,6 +40,8 @@ public class JavaBeanInfo {
     public final int            parserFeatures;
 
     public final JSONType       jsonType;
+    
+    public final String         typeName;
 
     public JavaBeanInfo(Class<?> clazz, //
                         Class<?> builderClass, //
@@ -57,6 +60,16 @@ public class JavaBeanInfo {
         this.buildMethod = buildMethod;
 
         this.jsonType = jsonType;
+        if (jsonType != null) {
+            String typeName = jsonType.typeName();
+            if (typeName.length() != 0) {
+                this.typeName = typeName;
+            } else {
+                this.typeName = clazz.getName();
+            }
+        } else {
+            this.typeName = clazz.getName();
+        }
 
         fields = new FieldInfo[fieldList.size()];
         fieldList.toArray(fields);
@@ -151,8 +164,9 @@ public class JavaBeanInfo {
                         Field field = TypeUtils.getField(clazz, fieldAnnotation.name(), declaredFields);
                         final int ordinal = fieldAnnotation.ordinal();
                         final int serialzeFeatures = SerializerFeature.of(fieldAnnotation.serialzeFeatures());
+                        final int parserFeatures = Feature.of(fieldAnnotation.parseFeatures());
                         FieldInfo fieldInfo = new FieldInfo(fieldAnnotation.name(), clazz, fieldClass, fieldType, field,
-                                                            ordinal, serialzeFeatures);
+                                                            ordinal, serialzeFeatures, parserFeatures);
                         add(fieldList, fieldInfo);
                     }
                 }
@@ -185,8 +199,9 @@ public class JavaBeanInfo {
                         Field field = TypeUtils.getField(clazz, fieldAnnotation.name(), declaredFields);
                         final int ordinal = fieldAnnotation.ordinal();
                         final int serialzeFeatures = SerializerFeature.of(fieldAnnotation.serialzeFeatures());
+                        final int parserFeatures = Feature.of(fieldAnnotation.parseFeatures());
                         FieldInfo fieldInfo = new FieldInfo(fieldAnnotation.name(), clazz, fieldClass, fieldType, field,
-                                                            ordinal, serialzeFeatures);
+                                                            ordinal, serialzeFeatures, parserFeatures);
                         add(fieldList, fieldInfo);
                     }
                 }
@@ -222,12 +237,12 @@ public class JavaBeanInfo {
                     continue;
                 }
 
-                int ordinal = 0, serialzeFeatures = 0;
+                int ordinal = 0, serialzeFeatures = 0, parserFeatures = 0;
 
                 JSONField annotation = method.getAnnotation(JSONField.class);
 
                 if (annotation == null) {
-                    annotation = TypeUtils.getSupperMethodAnnotation(clazz, method);
+                    annotation = TypeUtils.getSuperMethodAnnotation(clazz, method);
                 }
 
                 if (annotation != null) {
@@ -237,10 +252,11 @@ public class JavaBeanInfo {
 
                     ordinal = annotation.ordinal();
                     serialzeFeatures = SerializerFeature.of(annotation.serialzeFeatures());
+                    parserFeatures = Feature.of(annotation.parseFeatures());
 
                     if (annotation.name().length() != 0) {
                         String propertyName = annotation.name();
-                        add(fieldList, new FieldInfo(propertyName, method, null, clazz, type, ordinal, serialzeFeatures,
+                        add(fieldList, new FieldInfo(propertyName, method, null, clazz, type, ordinal, serialzeFeatures, parserFeatures, 
                                                      annotation, null, null));
                         continue;
                     }
@@ -266,7 +282,7 @@ public class JavaBeanInfo {
 
                 String propertyName = properNameBuilder.toString();
 
-                add(fieldList, new FieldInfo(propertyName, method, null, clazz, type, ordinal, serialzeFeatures,
+                add(fieldList, new FieldInfo(propertyName, method, null, clazz, type, ordinal, serialzeFeatures, parserFeatures, 
                                              annotation, null, null));
             }
 
@@ -309,7 +325,7 @@ public class JavaBeanInfo {
         }
 
         for (Method method : methods) { //
-            int ordinal = 0, serialzeFeatures = 0;
+            int ordinal = 0, serialzeFeatures = 0, parserFeatures = 0;
             String methodName = method.getName();
             if (methodName.length() < 4) {
                 continue;
@@ -320,7 +336,7 @@ public class JavaBeanInfo {
             }
 
             // support builder set
-            if (!(method.getReturnType().equals(Void.TYPE) || method.getReturnType().equals(clazz))) {
+            if (!(method.getReturnType().equals(Void.TYPE) || method.getReturnType().equals(method.getDeclaringClass()))) {
                 continue;
             }
             Class<?>[] types = method.getParameterTypes();
@@ -331,7 +347,7 @@ public class JavaBeanInfo {
             JSONField annotation = method.getAnnotation(JSONField.class);
 
             if (annotation == null) {
-                annotation = TypeUtils.getSupperMethodAnnotation(clazz, method);
+                annotation = TypeUtils.getSuperMethodAnnotation(clazz, method);
             }
 
             if (annotation != null) {
@@ -341,10 +357,11 @@ public class JavaBeanInfo {
 
                 ordinal = annotation.ordinal();
                 serialzeFeatures = SerializerFeature.of(annotation.serialzeFeatures());
+                parserFeatures = Feature.of(annotation.parseFeatures());
 
                 if (annotation.name().length() != 0) {
                     String propertyName = annotation.name();
-                    add(fieldList, new FieldInfo(propertyName, method, null, clazz, type, ordinal, serialzeFeatures,
+                    add(fieldList, new FieldInfo(propertyName, method, null, clazz, type, ordinal, serialzeFeatures, parserFeatures, 
                                                  annotation, null, null));
                     continue;
                 }
@@ -386,26 +403,44 @@ public class JavaBeanInfo {
                 fieldAnnotation = field.getAnnotation(JSONField.class);
 
                 if (fieldAnnotation != null) {
+                    if (!fieldAnnotation.deserialize()) {
+                        continue;
+                    }
+                    
                     ordinal = fieldAnnotation.ordinal();
                     serialzeFeatures = SerializerFeature.of(fieldAnnotation.serialzeFeatures());
+                    parserFeatures = Feature.of(fieldAnnotation.parseFeatures());
 
                     if (fieldAnnotation.name().length() != 0) {
                         propertyName = fieldAnnotation.name();
                         add(fieldList, new FieldInfo(propertyName, method, field, clazz, type, ordinal,
-                                                     serialzeFeatures, annotation, fieldAnnotation, null));
+                                                     serialzeFeatures, parserFeatures, annotation, fieldAnnotation, null));
                         continue;
                     }
                 }
 
             }
 
-            add(fieldList, new FieldInfo(propertyName, method, field, clazz, type, ordinal, serialzeFeatures,
+            add(fieldList, new FieldInfo(propertyName, method, field, clazz, type, ordinal, serialzeFeatures, parserFeatures,
                                          annotation, fieldAnnotation, null));
         }
 
         for (Field field : clazz.getFields()) { // public static fields
-            if (Modifier.isStatic(field.getModifiers())) {
+            int modifiers = field.getModifiers();
+            if ((modifiers & Modifier.STATIC) != 0) {
                 continue;
+            }
+            
+            if((modifiers & Modifier.FINAL) != 0) {
+                Class<?> fieldType = field.getType();
+                boolean supportReadOnly = Map.class.isAssignableFrom(fieldType) 
+                        || Collection.class.isAssignableFrom(fieldType)
+                        || AtomicLong.class.equals(fieldType) //
+                        || AtomicInteger.class.equals(fieldType) //
+                        || AtomicBoolean.class.equals(fieldType);
+                if (!supportReadOnly) {
+                    continue;
+                }
             }
 
             boolean contains = false;
@@ -420,20 +455,25 @@ public class JavaBeanInfo {
                 continue;
             }
 
-            int ordinal = 0, serialzeFeatures = 0;
+            int ordinal = 0, serialzeFeatures = 0, parserFeatures = 0;
             String propertyName = field.getName();
 
             JSONField fieldAnnotation = field.getAnnotation(JSONField.class);
 
             if (fieldAnnotation != null) {
+                if (!fieldAnnotation.deserialize()) {
+                    continue;
+                }
+                
                 ordinal = fieldAnnotation.ordinal();
                 serialzeFeatures = SerializerFeature.of(fieldAnnotation.serialzeFeatures());
+                parserFeatures = Feature.of(fieldAnnotation.parseFeatures());
 
                 if (fieldAnnotation.name().length() != 0) {
                     propertyName = fieldAnnotation.name();
                 }
             }
-            add(fieldList, new FieldInfo(propertyName, null, field, clazz, type, ordinal, serialzeFeatures, null,
+            add(fieldList, new FieldInfo(propertyName, null, field, clazz, type, ordinal, serialzeFeatures, parserFeatures, null,
                                          fieldAnnotation, null));
         }
 
@@ -461,18 +501,22 @@ public class JavaBeanInfo {
                     String propertyName;
 
                     JSONField annotation = method.getAnnotation(JSONField.class);
+                    if (annotation != null && annotation.deserialize()) {
+                        continue;
+                    }
+                    
                     if (annotation != null && annotation.name().length() > 0) {
                         propertyName = annotation.name();
                     } else {
                         propertyName = Character.toLowerCase(methodName.charAt(3)) + methodName.substring(4);
                     }
-
+                    
                     FieldInfo fieldInfo = getField(fieldList, propertyName);
                     if (fieldInfo != null) {
                         continue;
                     }
 
-                    add(fieldList, new FieldInfo(propertyName, method, null, clazz, type, 0, 0, annotation, null, null));
+                    add(fieldList, new FieldInfo(propertyName, method, null, clazz, type, 0, 0, 0, annotation, null, null));
                 }
             }
         }
